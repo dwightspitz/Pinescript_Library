@@ -1,0 +1,238 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Dwight_Spitz
+
+//@version=6
+strategy("ATR Hedge Fund Manager [SIGIL]", overlay=true, fill_orders_on_standard_ohlc = false, process_orders_on_close = true, default_qty_type = strategy.fixed, pyramiding = 100)
+
+r_sym = input.symbol("SPY", "Select Symbol for Momentum Calculation", group="Strategy Setup")
+start_date = input.time(timestamp("2024-03-01 04:00"), "Start Date", group="Strategy Setup")
+end_date = input.time(timestamp("2025-10-12 20:00"), "End Date", group="Strategy Setup")
+ticker = input.string("SPYU", "Target Symbol for Web Hook", group="Strategy Setup")
+hodl = input.float(2.03, "Hold%", tooltip="% position to hold", group="Strategy Setup")
+position_scale = input.float(1.0, "Position Scale Factor", minval=0.01, step=0.1, tooltip="Multiply position sizes by this factor. Use <1 to scale down, >1 to scale up", group="Strategy Setup")
+atr_multiplier = input.float(1, step=0.1, title="ATR Multiplier for Box Size", tooltip="Test Range: 16.4 ± 1.7, Step: 0.1 (14.7 to 18.1)", group="ATR Renko Settings")
+atr_length = input.int(14, "ATR Length", minval=1, tooltip="Test Range: 550 ± 70, Step: 1 (480 to 620) | ~4935 backtests total", group="ATR Renko Settings")
+
+//====================================================================================================================================================================//
+// SIMULATED RENKO CALCULATION USING ATR
+//====================================================================================================================================================================//
+
+// Request data from the momentum symbol
+[r_high, r_low, r_close, r_open] = request.security(r_sym, timeframe.period, [high, low, close, open])
+
+// Calculate ATR for box size
+r_tr = math.max(r_high - r_low, math.abs(r_high - r_close[1]), math.abs(r_low - r_close[1]))
+atr_value = ta.sma(r_tr, atr_length)
+box_size = atr_value * atr_multiplier
+
+// Initialize Renko state variables
+var float renko_close = na
+var float renko_open = na
+var int renko_direction = 0  // 1 for up, -1 for down, 0 for uninitialized
+
+// Initialize on first bar
+if na(renko_close)
+    renko_close := r_close
+    renko_open := r_close
+    renko_direction := 0
+
+// Calculate potential new Renko brick
+float temp_renko_close = renko_close
+float temp_renko_open = renko_open
+int temp_direction = renko_direction
+bool brick_formed = false
+
+// Check for up brick formation
+if r_close >= renko_close + box_size
+    // Calculate how many bricks can be formed
+    int num_bricks = math.floor((r_close - renko_close) / box_size)
+    temp_renko_open := renko_close
+    temp_renko_close := renko_close + (num_bricks * box_size)
+    temp_direction := 1
+    brick_formed := true
+
+// Check for down brick formation
+else if r_close <= renko_close - box_size
+    // Calculate how many bricks can be formed
+    int num_bricks = math.floor((renko_close - r_close) / box_size)
+    temp_renko_open := renko_close
+    temp_renko_close := renko_close - (num_bricks * box_size)
+    temp_direction := -1
+    brick_formed := true
+
+// Update Renko state if brick formed
+if brick_formed
+    renko_open := temp_renko_open
+    renko_close := temp_renko_close
+    renko_direction := temp_direction
+
+// Check if current bar is within date range
+in_date_range = time >= start_date and time <= end_date
+
+//====================================================================================================================================================================//
+// RENKO BAR DIRECTION TRACKING
+//====================================================================================================================================================================//
+
+// Track previous direction
+var int prev_renko_direction = 0
+bool direction_changed = brick_formed and (renko_direction != prev_renko_direction) and prev_renko_direction != 0
+
+// Determine current brick direction
+bool renko_bullish = renko_close > renko_open
+bool renko_bearish = renko_close < renko_open
+
+// Update previous direction
+if brick_formed
+    prev_renko_direction := renko_direction
+
+//====================================================================================================================================================================//
+// Renko Logic Setup
+//====================================================================================================================================================================//
+
+exit = 100 - hodl
+
+// Entry conditions - new up brick after down brick
+enter = brick_formed and renko_direction == 1 and prev_renko_direction == -1 and in_date_range
+
+// Add conditions - consecutive up brick
+add = brick_formed and renko_direction == 1 and prev_renko_direction == 1 and in_date_range
+
+// Hedge condition - new down brick after up brick
+hedge_condition = brick_formed and renko_direction == -1 and prev_renko_direction == 1 and in_date_range
+
+// Exit condition - consecutive down brick
+exit_condition = brick_formed and renko_direction == -1 and prev_renko_direction == -1 and in_date_range
+
+// ==================== ATR Calculation (Turtle Method) ====================
+
+// Request ATR data from the specified symbol (r_sym) at daily timeframe
+[r_high_daily, r_low_daily, r_close_daily] = request.security(r_sym, "1D", [high, low, close])
+
+// Calculate True Range using r_sym data
+r_tr_daily = math.max(r_high_daily - r_low_daily, math.abs(r_high_daily - r_close_daily[1]), math.abs(r_low_daily - r_close_daily[1]))
+
+// Calculate ATR using SMA (Turtle method)
+atr = ta.sma(r_tr_daily, 20)
+n_atr = (atr * (1/r_close_daily))
+n_add = (n_atr/2)
+poe = n_atr * 100 * position_scale
+poe_add = n_add * 100 * position_scale
+hedge = 66
+
+//====================================================================================================================================================================//
+// TRACK TICKER ATH
+//====================================================================================================================================================================//
+
+actual_high = request.security(r_sym == "" ? syminfo.tickerid : r_sym, timeframe.period, high)
+
+var float ticker_ath = 0.0
+if actual_high > ticker_ath
+    ticker_ath := actual_high
+
+//====================================================================================================================================================================//
+// Strategy Run Logic
+//====================================================================================================================================================================//
+
+enter_wh = '{"ticker":"' + ticker + '","action":"buy","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_equity","quantity":"' + str.tostring(poe) + '","signalPrice":"{{close}}"}'
+add_wh = '{"ticker":"' + ticker + '","action":"buy","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_equity","quantity":"' + str.tostring(poe_add) + '","signalPrice":"{{close}}"}'
+exit_wh = '{"ticker":"' + ticker + '","action":"sell","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_position","quantity":"' + str.tostring(exit) + '","timeInForce":"day","signalPrice":"{{close}}"}'
+hedge_wh = '{"ticker":"' + ticker + '","action":"sell","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_position","quantity":"' + str.tostring(hedge) + '","timeInForce":"day","signalPrice":"{{close}}"}'
+
+//---fix by qty---
+
+enter_fixed = (strategy.equity*(poe/100))/close
+add_fixed = (strategy.equity*(poe_add/100))/close
+
+var bool hold = false
+var bool hedged = false
+
+if enter
+    strategy.entry("Long", strategy.long, qty=enter_fixed, alert_message = enter_wh)
+    hold := false
+    hedged := false
+if add
+    strategy.entry("Long", strategy.long, qty=add_fixed, alert_message = add_wh)
+    hold := false
+    hedged := false
+if hedge_condition and not hedged
+    strategy.close("Long", qty_percent=hedge, alert_message = hedge_wh)
+    hedged := true
+if exit_condition and not hold
+    strategy.close("Long", qty_percent=exit, alert_message = exit_wh)
+    hold := true
+
+//====================================================================================================================================================================//
+// VISUALIZATION - Plot Renko Bricks and Targets
+//====================================================================================================================================================================//
+
+// Calculate Renko targets - price levels where next brick will form
+float up_target = renko_close + box_size     // Price needed for next up brick
+float down_target = renko_close - box_size   // Price needed for next down brick
+
+// Plot renko levels for visualization
+plot(renko_close, "Renko Close", color=renko_bullish ? color.green : color.red, linewidth=2)
+plot(renko_open, "Renko Open", color=color.gray, linewidth=1, style=plot.style_circles)
+
+// Plot Renko targets
+plot(up_target, "Up Target", color=color.new(color.lime, 50), linewidth=2, style=plot.style_stepline)
+plot(down_target, "Down Target", color=color.new(color.red, 50), linewidth=2, style=plot.style_stepline)
+
+// Fill zones between current renko close and targets
+fill_color_up = color.new(color.green, 90)
+fill_color_down = color.new(color.red, 90)
+p1 = plot(renko_close, display=display.none)
+p2 = plot(up_target, display=display.none)
+p3 = plot(down_target, display=display.none)
+fill(p1, p2, color=fill_color_up, title="Up Zone")
+fill(p1, p3, color=fill_color_down, title="Down Zone")
+
+// Plot signals
+plotshape(enter, "Enter Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(add, "Add Signal", shape.diamond, location.belowbar, color.lime, size=size.tiny)
+plotshape(hedge_condition, "Hedge Signal", shape.triangledown, location.abovebar, color.orange, size=size.small)
+plotshape(exit_condition, "Exit Signal", shape.xcross, location.abovebar, color.red, size=size.small)
+
+//====================================================================================================================================================================//
+// DISPLAY TABLE
+//====================================================================================================================================================================//
+
+// Create table in top right corner
+var table info_table = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+// Only update table on the last bar
+if barstate.islast
+    // Header
+    table.cell(info_table, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.normal)
+    table.cell(info_table, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.normal)
+
+    // All Time High
+    table.cell(info_table, 0, 1, "All Time High", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 1, str.tostring(ticker_ath, format.mintick), text_color=color.yellow, text_size=size.normal)
+
+    // Target Symbol
+    table.cell(info_table, 0, 2, "Target Symbol", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 2, ticker, text_color=color.aqua, text_size=size.normal)
+
+    // Box Size (ATR-based)
+    table.cell(info_table, 0, 3, "Box Size", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 3, str.tostring(box_size, "#.####"), text_color=color.purple, text_size=size.normal)
+
+    // ATR
+    table.cell(info_table, 0, 4, "ATR", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 4, str.tostring(atr, "#.####"), text_color=color.lime, text_size=size.normal)
+
+    // Position Scale Factor
+    table.cell(info_table, 0, 5, "Position Scale", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 5, str.tostring(position_scale, "#.##") + "x", text_color=color.white, text_size=size.normal)
+
+    // POE (Percent of Equity)
+    table.cell(info_table, 0, 6, "POE %", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 6, str.tostring(poe, "#.##") + "%", text_color=color.orange, text_size=size.normal)
+
+    // POE Add (Percent of Equity to Add)
+    table.cell(info_table, 0, 7, "POE Add %", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 7, str.tostring(poe_add, "#.##") + "%", text_color=color.orange, text_size=size.normal)
+
+    // HODL (Amount of Position to Hold)
+    table.cell(info_table, 0, 8, "HODL %", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 8, str.tostring(hodl, "#.##") + "%", text_color=color.fuchsia, text_size=size.normal)

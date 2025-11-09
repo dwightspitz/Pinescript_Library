@@ -1,0 +1,144 @@
+//@version=6
+strategy("TRAMA Turtle", overlay=true, default_qty_type=strategy.percent_of_equity, pyramiding=10, process_orders_on_close=true)
+
+// ===== INPUT PARAMETERS =====
+
+// THMA Cloud Settings
+enable_hma_cloud = input.bool(true, "Enable THMA Cloud", group="THMA Cloud")
+hma_length = input.int(50, "THMA Length", minval=1, group="THMA Cloud")
+hma_delay = input.int(2, "THMA Delay", minval=1, group="THMA Cloud")
+hma_timeframe = input.timeframe("", "THMA Timeframe", tooltip="Leave blank to use chart timeframe", group="THMA Cloud")
+
+// TRAMA Cloud Settings
+enable_trama_cloud = input.bool(true, "Enable TRAMA Cloud", group="TRAMA Cloud")
+trama_length = input.int(20, "TRAMA Length", minval=1, group="TRAMA Cloud")
+trama_delay = input.int(2, "TRAMA Delay", minval=1, group="TRAMA Cloud")
+trama_timeframe = input.timeframe("", "TRAMA Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA Cloud")
+
+// TRAMA 2 Settings
+enable_trama2_cloud = input.bool(false, "Enable TRAMA 2 Cloud", group="TRAMA 2")
+trama2_length = input.int(50, "TRAMA 2 Length", minval=1, group="TRAMA 2")
+trama2_delay = input.int(2, "TRAMA 2 Delay", minval=1, group="TRAMA 2")
+trama2_timeframe = input.timeframe("", "TRAMA 2 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 2")
+
+// ATR Position Sizing Settings
+atr_length = input.int(3920, "ATR Length", minval=1, group="ATR Position Sizing")
+use_atr_sizing = input.bool(true, "Use ATR Position Sizing", group="ATR Position Sizing")
+atr_add_multiple = input.float(0.5, "ATR Add Multiple", minval=0.1, step=0.1, group="ATR Position Sizing", tooltip="Add to position every X ATR move")
+
+// ===== HELPER FUNCTIONS =====
+
+// Triple Hull Moving Average (THMA)
+thma(src, length) =>
+    hma1 = ta.wma(2 * ta.wma(src, length / 2) - ta.wma(src, length), math.round(math.sqrt(length)))
+    hma2 = ta.wma(2 * ta.wma(hma1, length / 2) - ta.wma(hma1, length), math.round(math.sqrt(length)))
+    ta.wma(2 * ta.wma(hma2, length / 2) - ta.wma(hma2, length), math.round(math.sqrt(length)))
+
+// TRAMA CALCULATION FUNCTION
+trama_calc(src, length) =>
+    var float ama = na
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma((hh + ll) > 0 ? 1 : 0, length), 2)
+    ama := nz(ama[1] + tc * (src - ama[1]), src)
+    ama
+
+// ===== INDICATOR CALCULATIONS =====
+
+// Helper function to get close data from timeframe (or chart if blank)
+get_tf_close(tf) =>
+    tf == "" ? close : request.security(syminfo.tickerid, tf, close)
+
+// Get THMA data from selected timeframe
+hma_close = get_tf_close(hma_timeframe)
+thma_current = enable_hma_cloud ? thma(hma_close, hma_length) : na
+hma1 = thma_current
+hma2 = enable_hma_cloud ? thma_current[hma_delay] : na
+
+// Get TRAMA data from selected timeframe
+trama_close = get_tf_close(trama_timeframe)
+trama_current = enable_trama_cloud ? trama_calc(trama_close, trama_length) : na
+trama1 = trama_current
+trama2 = enable_trama_cloud ? trama_current[trama_delay] : na
+
+// Get TRAMA 2 data from selected timeframe
+trama2_close = get_tf_close(trama2_timeframe)
+trama2_current = enable_trama2_cloud ? trama_calc(trama2_close, trama2_length) : na
+trama2_1 = trama2_current
+trama2_2 = enable_trama2_cloud ? trama2_current[trama2_delay] : na
+
+// ===== ATR POSITION SIZING =====
+
+// Calculate True Range (Turtle method)
+tr = math.max(high - low, math.abs(high - close[1]), math.abs(low - close[1]))
+
+// Calculate ATR using SMA (Turtle method)
+atr = ta.sma(tr, atr_length)
+
+// Normalize ATR to percentage of close price
+n_atr = (atr / close)
+
+// Calculate percent of equity to risk
+poe = n_atr * 100
+
+// Calculate position size in contracts
+position_qty = use_atr_sizing ? (strategy.equity * (poe / 100)) / close : 1
+add_qty = position_qty / 2
+
+// ===== PLOTTING =====
+
+// Plot THMA Cloud
+hma1_plot = plot(enable_hma_cloud ? hma1 : na, "THMA", color=color.new(color.green, 0), linewidth=2)
+hma2_plot = plot(enable_hma_cloud ? hma2 : na, "THMA[2]", color=color.new(color.red, 0), linewidth=2)
+fill(hma1_plot, hma2_plot, color=enable_hma_cloud and hma1 > hma2 ? color.new(color.green, 80) : color.new(color.red, 80), title="THMA Cloud")
+
+// Plot TRAMA Cloud
+trama1_plot = plot(enable_trama_cloud ? trama1 : na, "TRAMA Fast", color=color.new(color.blue, 0), linewidth=2)
+trama2_plot = plot(enable_trama_cloud ? trama2 : na, "TRAMA Slow", color=color.new(color.orange, 0), linewidth=2)
+fill(trama1_plot, trama2_plot, color=enable_trama_cloud and trama1 > trama2 ? color.new(color.blue, 80) : color.new(color.orange, 80), title="TRAMA Cloud")
+
+// Plot TRAMA 2 Cloud
+trama2_1_plot = plot(enable_trama2_cloud ? trama2_1 : na, "TRAMA 2 Fast", color=color.new(color.purple, 0), linewidth=2)
+trama2_2_plot = plot(enable_trama2_cloud ? trama2_2 : na, "TRAMA 2 Slow", color=color.new(color.yellow, 0), linewidth=2)
+fill(trama2_1_plot, trama2_2_plot, color=enable_trama2_cloud and trama2_1 > trama2_2 ? color.new(color.purple, 80) : color.new(color.yellow, 80), title="TRAMA 2 Cloud")
+
+// ===== STRATEGY LOGIC =====
+
+// Track position entry levels for pyramiding
+var float last_add_price = na
+var float last_add_atr = na
+
+// Entry: Price crosses above ANY line
+entry_signal = ta.crossover(close, hma1) or ta.crossover(close, hma2) or
+               ta.crossover(close, trama1) or ta.crossover(close, trama2) or
+               ta.crossover(close, trama2_1) or ta.crossover(close, trama2_2)
+
+// Exit: Price crosses below ANY line
+exit_signal = ta.crossunder(close, hma1) or ta.crossunder(close, hma2) or
+              ta.crossunder(close, trama1) or ta.crossunder(close, trama2) or
+              ta.crossunder(close, trama2_1) or ta.crossunder(close, trama2_2)
+
+// Check if price has moved enough to add to position
+bool add_signal = false
+if strategy.position_size > 0 and not na(last_add_price) and not na(last_add_atr)
+    price_move = close - last_add_price
+    atr_threshold = last_add_atr * atr_add_multiple
+    add_signal := price_move >= atr_threshold
+
+// Execute initial entry
+if entry_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=position_qty)
+    last_add_price := close
+    last_add_atr := atr
+
+// Add to position at 0.5 ATR intervals
+if add_signal
+    strategy.entry("Long", strategy.long, qty=add_qty)
+    last_add_price := close
+    last_add_atr := atr
+
+// Exit position
+if exit_signal and strategy.position_size > 0
+    strategy.close("Long")
+    last_add_price := na
+    last_add_atr := na
