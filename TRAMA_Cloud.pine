@@ -1,0 +1,77 @@
+//@version=6
+strategy("TRAMA Cloud [SIGIL]", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, pyramiding=2, process_orders_on_close=true)
+
+// ===== INPUT PARAMETERS =====
+
+// Short TRAMA Settings
+short_trama_length = input.int(20, "Short TRAMA Length", minval=1, group="Short TRAMA")
+short_trama_source = input.source(close, "Short TRAMA Source", group="Short TRAMA")
+short_trama_timeframe = input.timeframe("", "Short TRAMA Timeframe", tooltip="Leave blank to use chart timeframe", group="Short TRAMA")
+
+// Long TRAMA Settings
+long_trama_length = input.int(50, "Long TRAMA Length", minval=1, group="Long TRAMA")
+long_trama_source = input.source(close, "Long TRAMA Source", group="Long TRAMA")
+long_trama_timeframe = input.timeframe("", "Long TRAMA Timeframe", tooltip="Leave blank to use chart timeframe", group="Long TRAMA")
+
+// ===== HELPER FUNCTIONS =====
+
+// TRAMA CALCULATION FUNCTION
+trama_calc(src, length) =>
+    var float ama = na
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma((hh + ll) > 0 ? 1 : 0, length), 2)
+    ama := nz(ama[1] + tc * (src - ama[1]), src)
+    ama
+
+// Helper function to get source data from timeframe
+get_tf_source(src, tf) =>
+    tf == "" ? src : request.security(syminfo.tickerid, tf, src)
+
+// ===== INDICATOR CALCULATIONS =====
+
+// Get Short TRAMA data
+short_trama_src = get_tf_source(short_trama_source, short_trama_timeframe)
+short_trama = trama_calc(short_trama_src, short_trama_length)
+
+// Get Long TRAMA data
+long_trama_src = get_tf_source(long_trama_source, long_trama_timeframe)
+long_trama = trama_calc(long_trama_src, long_trama_length)
+
+// ===== PLOTTING =====
+
+// Plot Short TRAMA (Green)
+plot(short_trama, "Short TRAMA", color=color.new(color.green, 0), linewidth=2)
+
+// Plot Long TRAMA (Red)
+plot(long_trama, "Long TRAMA", color=color.new(color.red, 0), linewidth=2)
+
+// ===== STRATEGY LOGIC =====
+
+// Entry Condition 1: Price crosses above short TRAMA while short TRAMA is below long TRAMA
+entry_price_cross = ta.crossover(close, short_trama) and short_trama < long_trama
+
+// Entry Condition 2: Short TRAMA crosses above long TRAMA
+entry_trama_cross = ta.crossover(short_trama, long_trama)
+
+// Exit Condition 1: Price crosses below long TRAMA
+exit_price_cross = ta.crossunder(close, long_trama)
+
+// Exit Condition 2: Short TRAMA crosses below long TRAMA
+exit_trama_cross = ta.crossunder(short_trama, long_trama)
+
+// Execute Entry 1 (Price cross)
+if entry_price_cross
+    strategy.entry("Long Price", strategy.long, qty=1)
+
+// Execute Entry 2 (TRAMA cross)
+if entry_trama_cross
+    strategy.entry("Long TRAMA", strategy.long, qty=1)
+
+// Execute Exit 1 (Price cross below long TRAMA)
+if exit_price_cross and strategy.position_size > 0
+    strategy.close("Long Price", qty=1)
+
+// Execute Exit 2 (Short TRAMA crosses below long TRAMA)
+if exit_trama_cross and strategy.position_size > 0
+    strategy.close("Long TRAMA", qty=1)

@@ -1,0 +1,115 @@
+//@version=6
+strategy("Options Momentum [SIGIL]", overlay=true, default_qty_type=strategy.percent_of_equity, pyramiding=10, process_orders_on_close=true)
+
+// ===== INPUT PARAMETERS =====
+
+// TRAMA 1 Settings
+enable_trama1 = input.bool(true, "Enable TRAMA 1", group="TRAMA 1")
+trama1_length = input.int(6, "TRAMA 1 Length", minval=1, group="TRAMA 1")
+trama1_delay = input.int(43, "TRAMA 1 Delay", minval=1, group="TRAMA 1")
+trama1_timeframe = input.timeframe("15S", "TRAMA 1 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 1")
+
+// TRAMA 2 Settings
+enable_trama2 = input.bool(true, "Enable TRAMA 2", group="TRAMA 2")
+trama2_length = input.int(1, "TRAMA 2 Length", minval=1, group="TRAMA 2")
+trama2_delay = input.int(963, "TRAMA 2 Delay", minval=1, group="TRAMA 2")
+trama2_timeframe = input.timeframe("15S", "TRAMA 2 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 2")
+
+// RSI Settings
+enable_rsi_filter = input.bool(true, "Enable RSI Slope Filter", group="RSI SETTINGS")
+rsi_length = input.int(14, "RSI Length", minval=1, group="RSI SETTINGS")
+rsi_timeframe = input.timeframe("15S", "RSI Timeframe", tooltip="Leave blank to use chart timeframe", group="RSI SETTINGS")
+
+// Smoothing Settings
+smoothing_type = input.string("EMA", "Smoothing Type", options=["EMA", "WMA", "HMA", "RMA"], group="SMOOTHING SETTINGS")
+smoothing_length = input.int(14, "Smoothing Length", minval=1, group="SMOOTHING SETTINGS")
+
+// RSI Slope Threshold
+rsi_slope_threshold = input.float(0.0, "RSI Slope Threshold", step=0.01, tooltip="Minimum slope value to allow entries", group="RSI SETTINGS")
+
+// ===== HELPER FUNCTIONS =====
+
+// TRAMA CALCULATION FUNCTION
+trama_calc(src, length) =>
+    var float ama = na
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma((hh + ll) > 0 ? 1 : 0, length), 2)
+    ama := nz(ama[1] + tc * (src - ama[1]), src)
+    ama
+
+// Helper function to get close data from timeframe (or chart if blank)
+get_tf_close(tf) =>
+    tf == "" ? close : request.security(syminfo.tickerid, tf, close)
+
+// Smoothing function
+smooth(src, type, length) =>
+    switch type
+        "EMA" => ta.ema(src, length)
+        "WMA" => ta.wma(src, length)
+        "HMA" => ta.hma(src, length)
+        "RMA" => ta.rma(src, length)
+        => src
+
+// ===== INDICATOR CALCULATIONS =====
+
+// Get TRAMA 1 data from selected timeframe
+trama1_close = get_tf_close(trama1_timeframe)
+trama1_current = enable_trama1 ? trama_calc(trama1_close, trama1_length) : na
+trama1_fast = trama1_current
+trama1_slow = enable_trama1 ? trama1_current[trama1_delay] : na
+
+// Get TRAMA 2 data from selected timeframe
+trama2_close = get_tf_close(trama2_timeframe)
+trama2_current = enable_trama2 ? trama_calc(trama2_close, trama2_length) : na
+trama2_fast = trama2_current
+trama2_slow = enable_trama2 ? trama2_current[trama2_delay] : na
+
+// Get RSI data from selected timeframe
+rsi_close = rsi_timeframe == "" ? close : request.security(syminfo.tickerid, rsi_timeframe, close)
+rsi_raw = ta.rsi(rsi_close, rsi_length)
+rsi_smoothed = smooth(rsi_raw, smoothing_type, smoothing_length)
+
+// Calculate RSI slope
+rsi_slope = rsi_smoothed - rsi_smoothed[1]
+
+// RSI filter condition
+rsi_filter_pass = enable_rsi_filter ? rsi_slope >= rsi_slope_threshold : true
+
+// ===== PLOTTING =====
+
+// Plot TRAMA 1 Cloud
+trama1_fast_plot = plot(enable_trama1 ? trama1_fast : na, "TRAMA 1 Fast", color=color.new(color.blue, 0), linewidth=2)
+trama1_slow_plot = plot(enable_trama1 ? trama1_slow : na, "TRAMA 1 Slow", color=color.new(color.orange, 0), linewidth=2)
+fill(trama1_fast_plot, trama1_slow_plot, color=enable_trama1 and trama1_fast > trama1_slow ? color.new(color.blue, 80) : color.new(color.orange, 80), title="TRAMA 1 Cloud")
+
+// Plot TRAMA 2 Cloud
+trama2_fast_plot = plot(enable_trama2 ? trama2_fast : na, "TRAMA 2 Fast", color=color.new(color.green, 0), linewidth=2)
+trama2_slow_plot = plot(enable_trama2 ? trama2_slow : na, "TRAMA 2 Slow", color=color.new(color.red, 0), linewidth=2)
+fill(trama2_fast_plot, trama2_slow_plot, color=enable_trama2 and trama2_fast > trama2_slow ? color.new(color.green, 80) : color.new(color.red, 80), title="TRAMA 2 Cloud")
+
+// ===== STRATEGY LOGIC =====
+
+// Check if price is above TRAMA lines (in valid zone)
+price_above_trama = close > trama1_fast or close > trama2_fast
+
+// RSI slope crosses above threshold (momentum catches up)
+rsi_slope_crossover = enable_rsi_filter ? ta.crossover(rsi_slope, rsi_slope_threshold) : false
+
+// Entry conditions:
+// 1. Price crosses above ANY fast TRAMA line AND RSI slope filter passes (primary entry)
+// 2. Price is STILL above TRAMA AND RSI slope crosses above threshold (secondary entry)
+entry_signal = ((ta.crossover(close, trama1_fast) or ta.crossover(close, trama2_fast)) and rsi_filter_pass) or
+               (price_above_trama and rsi_slope_crossover)
+//entry_signal = ta.crossover(close, trama2_fast)
+
+// Exit: Price crosses below ANY slow TRAMA line
+exit_signal = ta.crossunder(close, trama1_slow) or ta.crossunder(close, trama2_slow)
+//exit_signal = ta.crossunder(close, trama1_slow)
+
+// Execute trades
+if entry_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long)
+
+if exit_signal and strategy.position_size > 0
+    strategy.close("Long")

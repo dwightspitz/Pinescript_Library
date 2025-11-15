@@ -21,6 +21,24 @@ trama2_length = input.int(50, "TRAMA 2 Length", minval=1, group="TRAMA 2")
 trama2_delay = input.int(2, "TRAMA 2 Delay", minval=1, group="TRAMA 2")
 trama2_timeframe = input.timeframe("", "TRAMA 2 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 2")
 
+// TRAMA 3 Settings
+enable_trama3_cloud = input.bool(false, "Enable TRAMA 3 Cloud", group="TRAMA 3")
+trama3_length = input.int(100, "TRAMA 3 Length", minval=1, group="TRAMA 3")
+trama3_delay = input.int(2, "TRAMA 3 Delay", minval=1, group="TRAMA 3")
+trama3_timeframe = input.timeframe("", "TRAMA 3 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 3")
+
+// TRAMA 4 Settings
+enable_trama4_cloud = input.bool(false, "Enable TRAMA 4 Cloud", group="TRAMA 4")
+trama4_length = input.int(150, "TRAMA 4 Length", minval=1, group="TRAMA 4")
+trama4_delay = input.int(2, "TRAMA 4 Delay", minval=1, group="TRAMA 4")
+trama4_timeframe = input.timeframe("", "TRAMA 4 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 4")
+
+// TRAMA 5 Settings
+enable_trama5_cloud = input.bool(false, "Enable TRAMA 5 Cloud", group="TRAMA 5")
+trama5_length = input.int(200, "TRAMA 5 Length", minval=1, group="TRAMA 5")
+trama5_delay = input.int(2, "TRAMA 5 Delay", minval=1, group="TRAMA 5")
+trama5_timeframe = input.timeframe("", "TRAMA 5 Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA 5")
+
 // ATR Position Sizing Settings
 atr_length = input.int(3920, "ATR Length", minval=1, group="ATR Position Sizing")
 use_atr_sizing = input.bool(true, "Use ATR Position Sizing", group="ATR Position Sizing")
@@ -67,6 +85,24 @@ trama2_current = enable_trama2_cloud ? trama_calc(trama2_close, trama2_length) :
 trama2_1 = trama2_current
 trama2_2 = enable_trama2_cloud ? trama2_current[trama2_delay] : na
 
+// Get TRAMA 3 data from selected timeframe
+trama3_close = get_tf_close(trama3_timeframe)
+trama3_current = enable_trama3_cloud ? trama_calc(trama3_close, trama3_length) : na
+trama3_1 = trama3_current
+trama3_2 = enable_trama3_cloud ? trama3_current[trama3_delay] : na
+
+// Get TRAMA 4 data from selected timeframe
+trama4_close = get_tf_close(trama4_timeframe)
+trama4_current = enable_trama4_cloud ? trama_calc(trama4_close, trama4_length) : na
+trama4_1 = trama4_current
+trama4_2 = enable_trama4_cloud ? trama4_current[trama4_delay] : na
+
+// Get TRAMA 5 data from selected timeframe
+trama5_close = get_tf_close(trama5_timeframe)
+trama5_current = enable_trama5_cloud ? trama_calc(trama5_close, trama5_length) : na
+trama5_1 = trama5_current
+trama5_2 = enable_trama5_cloud ? trama5_current[trama5_delay] : na
+
 // ===== ATR POSITION SIZING =====
 
 // Calculate True Range (Turtle method)
@@ -102,21 +138,42 @@ trama2_1_plot = plot(enable_trama2_cloud ? trama2_1 : na, "TRAMA 2 Fast", color=
 trama2_2_plot = plot(enable_trama2_cloud ? trama2_2 : na, "TRAMA 2 Slow", color=color.new(color.yellow, 0), linewidth=2)
 fill(trama2_1_plot, trama2_2_plot, color=enable_trama2_cloud and trama2_1 > trama2_2 ? color.new(color.purple, 80) : color.new(color.yellow, 80), title="TRAMA 2 Cloud")
 
+// Plot TRAMA 3 Cloud
+trama3_1_plot = plot(enable_trama3_cloud ? trama3_1 : na, "TRAMA 3 Fast", color=color.new(color.aqua, 0), linewidth=2)
+trama3_2_plot = plot(enable_trama3_cloud ? trama3_2 : na, "TRAMA 3 Slow", color=color.new(color.maroon, 0), linewidth=2)
+fill(trama3_1_plot, trama3_2_plot, color=enable_trama3_cloud and trama3_1 > trama3_2 ? color.new(color.aqua, 80) : color.new(color.maroon, 80), title="TRAMA 3 Cloud")
+
+// Plot TRAMA 4 Cloud
+trama4_1_plot = plot(enable_trama4_cloud ? trama4_1 : na, "TRAMA 4 Fast", color=color.new(color.lime, 0), linewidth=2)
+trama4_2_plot = plot(enable_trama4_cloud ? trama4_2 : na, "TRAMA 4 Slow", color=color.new(color.fuchsia, 0), linewidth=2)
+fill(trama4_1_plot, trama4_2_plot, color=enable_trama4_cloud and trama4_1 > trama4_2 ? color.new(color.lime, 80) : color.new(color.fuchsia, 80), title="TRAMA 4 Cloud")
+
+// Plot TRAMA 5 Cloud
+trama5_1_plot = plot(enable_trama5_cloud ? trama5_1 : na, "TRAMA 5 Fast", color=color.new(color.navy, 0), linewidth=2)
+trama5_2_plot = plot(enable_trama5_cloud ? trama5_2 : na, "TRAMA 5 Slow", color=color.new(color.olive, 0), linewidth=2)
+fill(trama5_1_plot, trama5_2_plot, color=enable_trama5_cloud and trama5_1 > trama5_2 ? color.new(color.navy, 80) : color.new(color.olive, 80), title="TRAMA 5 Cloud")
+
 // ===== STRATEGY LOGIC =====
 
 // Track position entry levels for pyramiding
 var float last_add_price = na
 var float last_add_atr = na
 
-// Entry: Price crosses above ANY line
-entry_signal = ta.crossover(close, hma1) or ta.crossover(close, hma2) or
-               ta.crossover(close, trama1) or ta.crossover(close, trama2) or
-               ta.crossover(close, trama2_1) or ta.crossover(close, trama2_2)
+// Entry: Price crosses above ANY fast (current) line
+entry_signal = ta.crossover(close, hma1) or
+               ta.crossover(close, trama1) or
+               ta.crossover(close, trama2_1) or
+               ta.crossover(close, trama3_1) or
+               ta.crossover(close, trama4_1) or
+               ta.crossover(close, trama5_1)
 
-// Exit: Price crosses below ANY line
-exit_signal = ta.crossunder(close, hma1) or ta.crossunder(close, hma2) or
-              ta.crossunder(close, trama1) or ta.crossunder(close, trama2) or
-              ta.crossunder(close, trama2_1) or ta.crossunder(close, trama2_2)
+// Exit: Price crosses below ANY slow (delayed) line
+exit_signal = ta.crossunder(close, hma2) or
+              ta.crossunder(close, trama2) or
+              ta.crossunder(close, trama2_2) or
+              ta.crossunder(close, trama3_2) or
+              ta.crossunder(close, trama4_2) or
+              ta.crossunder(close, trama5_2)
 
 // Check if price has moved enough to add to position
 bool add_signal = false
