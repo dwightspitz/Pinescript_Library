@@ -2,7 +2,7 @@
 // © Dwight_Spitz
 
 //@version=6
-strategy("ATR Hedge Fund Manager [SIGIL]", overlay=true, fill_orders_on_standard_ohlc = false, process_orders_on_close = true, default_qty_type = strategy.fixed, pyramiding = 100)
+strategy("Hedge Fund Manager [SIGIL]", overlay=true, fill_orders_on_standard_ohlc = false, process_orders_on_close = true, default_qty_type = strategy.fixed, pyramiding = 100)
 
 r_sym = input.symbol("SPY", "Select Symbol for Momentum Calculation", group="Strategy Setup")
 start_date = input.time(timestamp("2024-03-01 04:00"), "Start Date", group="Strategy Setup")
@@ -10,8 +10,19 @@ end_date = input.time(timestamp("2025-10-12 20:00"), "End Date", group="Strategy
 ticker = input.string("SPYU", "Target Symbol for Web Hook", group="Strategy Setup")
 hodl = input.float(2.03, "Hold%", tooltip="% position to hold", group="Strategy Setup")
 position_scale = input.float(1.0, "Position Scale Factor", minval=0.01, step=0.1, tooltip="Multiply position sizes by this factor. Use <1 to scale down, >1 to scale up", group="Strategy Setup")
+//test_mode = input.bool(false, "Test Mode", tooltip="Simple mode: qty=1 entries/exits, max 2 positions", group="Strategy Setup")
 atr_multiplier = input.float(1, step=0.1, title="ATR Multiplier for Box Size", tooltip="Test Range: 16.4 ± 1.7, Step: 0.1 (14.7 to 18.1)", group="ATR Renko Settings")
 atr_length = input.int(14, "ATR Length", minval=1, tooltip="Test Range: 550 ± 70, Step: 1 (480 to 620) | ~4935 backtests total", group="ATR Renko Settings")
+
+// TRAMA Cloud Settings
+enable_trama_cloud = input.bool(false, "Enable TRAMA Cloud", group="TRAMA Cloud")
+short_trama_length = input.int(20, "Short TRAMA Length", minval=1, group="TRAMA Cloud")
+//short_trama_source = input.source(close, "Short TRAMA Source", group="TRAMA Cloud")
+//short_trama_timeframe = input.timeframe("", "Short TRAMA Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA Cloud")
+long_trama_length = input.int(50, "Long TRAMA Length", minval=1, group="TRAMA Cloud")
+//long_trama_source = input.source(close, "Long TRAMA Source", group="TRAMA Cloud")
+//long_trama_timeframe = input.timeframe("", "Long TRAMA Timeframe", tooltip="Leave blank to use chart timeframe", group="TRAMA Cloud")
+trama_exit_percent = input.float(100, "TRAMA Exit %", minval=0, maxval=100, step=1, tooltip="% of position to exit on TRAMA signals", group="TRAMA Cloud")
 
 //====================================================================================================================================================================//
 // SIMULATED RENKO CALCULATION USING ATR
@@ -70,6 +81,31 @@ if brick_formed
 in_date_range = time >= start_date and time <= end_date
 
 //====================================================================================================================================================================//
+// TRAMA CLOUD CALCULATION
+//====================================================================================================================================================================//
+
+// TRAMA calculation function
+trama_calc(src, length) =>
+    var float ama = na
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma((hh + ll) > 0 ? 1 : 0, length), 2)
+    ama := nz(ama[1] + tc * (src - ama[1]), src)
+    ama
+
+// Helper function to get source data from timeframe
+get_tf_source(src, tf) =>
+    tf == "" ? src : request.security(syminfo.tickerid, tf, src)
+
+// Get Short TRAMA data
+short_trama_src = enable_trama_cloud ? get_tf_source(close, "") : na
+short_trama = enable_trama_cloud ? trama_calc(short_trama_src, short_trama_length) : na
+
+// Get Long TRAMA data
+long_trama_src = enable_trama_cloud ? get_tf_source(close, ""): na
+long_trama = enable_trama_cloud ? trama_calc(long_trama_src, long_trama_length) : na
+
+//====================================================================================================================================================================//
 // RENKO BAR DIRECTION TRACKING
 //====================================================================================================================================================================//
 
@@ -103,13 +139,30 @@ hedge_condition = brick_formed and renko_direction == -1 and prev_renko_directio
 // Exit condition - consecutive down brick
 exit_condition = brick_formed and renko_direction == -1 and prev_renko_direction == -1 and in_date_range
 
+//====================================================================================================================================================================//
+// TRAMA CLOUD SIGNALS
+//====================================================================================================================================================================//
+
+// TRAMA Entry Condition 1: Price crosses above short TRAMA while short TRAMA is below long TRAMA
+trama_entry_price = enable_trama_cloud ? (ta.crossover(close, short_trama) and short_trama < long_trama and in_date_range) : false
+
+// TRAMA Entry Condition 2: Short TRAMA crosses above long TRAMA
+//trama_entry_cross = enable_trama_cloud ? (ta.crossover(short_trama, long_trama) and in_date_range) : false
+
+// TRAMA Exit Condition 1: Price crosses below long TRAMA
+trama_exit_price = enable_trama_cloud ? (ta.crossunder(close, long_trama) and in_date_range) : false
+
+// TRAMA Exit Condition 2: Short TRAMA crosses below long TRAMA
+trama_exit_cross = enable_trama_cloud ? (ta.crossunder(short_trama, long_trama) and in_date_range) : false
+
 // ==================== ATR Calculation (Turtle Method) ====================
 
 // Request ATR data from the specified symbol (r_sym) at daily timeframe
 [r_high_daily, r_low_daily, r_close_daily] = request.security(r_sym, "1D", [high, low, close])
 
 // Calculate True Range using r_sym data
-r_tr_daily = math.max(r_high_daily - r_low_daily, math.abs(r_high_daily - r_close_daily[1]), math.abs(r_low_daily - r_close_daily[1]))
+//r_tr_daily = math.max(r_high_daily - r_low_daily, math.abs(r_high_daily - r_close_daily[1]), math.abs(r_low_daily - r_close_daily[1]))
+r_tr_daily = request.security(r_sym, "1D", ta.atr(20))
 
 // Calculate ATR using SMA (Turtle method)
 atr = ta.sma(r_tr_daily, 20)
@@ -137,6 +190,8 @@ enter_wh = '{"ticker":"' + ticker + '","action":"buy","time":"{{timenow}}","orde
 add_wh = '{"ticker":"' + ticker + '","action":"buy","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_equity","quantity":"' + str.tostring(poe_add) + '","signalPrice":"{{close}}"}'
 exit_wh = '{"ticker":"' + ticker + '","action":"sell","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_position","quantity":"' + str.tostring(exit) + '","timeInForce":"day","signalPrice":"{{close}}"}'
 hedge_wh = '{"ticker":"' + ticker + '","action":"sell","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_position","quantity":"' + str.tostring(hedge) + '","timeInForce":"day","signalPrice":"{{close}}"}'
+trama_enter_wh = '{"ticker":"' + ticker + '","action":"buy","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_equity","quantity":"' + str.tostring(poe) + '","signalPrice":"{{close}}"}'
+trama_exit_wh = '{"ticker":"' + ticker + '","action":"sell","time":"{{timenow}}","orderType":"market","quantityType":"percent_of_position","quantity":"' + str.tostring(trama_exit_percent) + '","timeInForce":"day","signalPrice":"{{close}}"}'
 
 //---fix by qty---
 
@@ -145,7 +200,8 @@ add_fixed = (strategy.equity*(poe_add/100))/close
 
 var bool hold = false
 var bool hedged = false
-
+var bool in_trama = false
+// Renko entries
 if enter
     strategy.entry("Long", strategy.long, qty=enter_fixed, alert_message = enter_wh)
     hold := false
@@ -154,12 +210,28 @@ if add
     strategy.entry("Long", strategy.long, qty=add_fixed, alert_message = add_wh)
     hold := false
     hedged := false
+
+// TRAMA entries (using ATR sizing)
+if trama_entry_price and not in_trama
+    strategy.entry("Long", strategy.long, qty=enter_fixed, alert_message = trama_enter_wh)
+    in_trama := true
+
+
+// Renko exits
 if hedge_condition and not hedged
     strategy.close("Long", qty_percent=hedge, alert_message = hedge_wh)
     hedged := true
 if exit_condition and not hold
     strategy.close("Long", qty_percent=exit, alert_message = exit_wh)
     hold := true
+
+// TRAMA exits
+if trama_exit_price and in_trama
+    strategy.close("Long", qty_percent=trama_exit_percent, alert_message = trama_exit_wh)
+    in_trama := false
+if trama_exit_cross and in_trama
+    strategy.close("Long TRAMA", qty_percent=trama_exit_percent, alert_message = trama_exit_wh)
+    in_trama := false
 
 //====================================================================================================================================================================//
 // VISUALIZATION - Plot Renko Bricks and Targets
@@ -186,18 +258,28 @@ p3 = plot(down_target, display=display.none)
 fill(p1, p2, color=fill_color_up, title="Up Zone")
 fill(p1, p3, color=fill_color_down, title="Down Zone")
 
+// Plot TRAMA Cloud lines
+plot(enable_trama_cloud ? short_trama : na, "Short TRAMA", color=color.new(color.green, 0), linewidth=2)
+plot(enable_trama_cloud ? long_trama : na, "Long TRAMA", color=color.new(color.red, 0), linewidth=2)
+
 // Plot signals
 plotshape(enter, "Enter Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(add, "Add Signal", shape.diamond, location.belowbar, color.lime, size=size.tiny)
 plotshape(hedge_condition, "Hedge Signal", shape.triangledown, location.abovebar, color.orange, size=size.small)
 plotshape(exit_condition, "Exit Signal", shape.xcross, location.abovebar, color.red, size=size.small)
 
+// Plot TRAMA signals
+plotshape(trama_entry_price, "TRAMA Price Entry", shape.circle, location.belowbar, color.new(color.green, 50), size=size.tiny)
+//plotshape(trama_entry_cross, "TRAMA Cross Entry", shape.square, location.belowbar, color.new(color.lime, 50), size=size.tiny)
+plotshape(trama_exit_price, "TRAMA Price Exit", shape.circle, location.abovebar, color.new(color.red, 50), size=size.tiny)
+plotshape(trama_exit_cross, "TRAMA Cross Exit", shape.square, location.abovebar, color.new(color.orange, 50), size=size.tiny)
+
 //====================================================================================================================================================================//
 // DISPLAY TABLE
 //====================================================================================================================================================================//
 
 // Create table in top right corner
-var table info_table = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+var table info_table = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
 
 // Only update table on the last bar
 if barstate.islast
@@ -236,3 +318,43 @@ if barstate.islast
     // HODL (Amount of Position to Hold)
     table.cell(info_table, 0, 8, "HODL %", text_color=color.white, text_size=size.normal)
     table.cell(info_table, 1, 8, str.tostring(hodl, "#.##") + "%", text_color=color.fuchsia, text_size=size.normal)
+
+    // Max Exposure Ratio
+    table.cell(info_table, 0, 9, "Max Exposure", text_color=color.white, text_size=size.normal)
+    max_contracts = strategy.max_contracts_held_long
+    max_exposure = (max_contracts * ticker_ath) / strategy.initial_capital
+    table.cell(info_table, 1, 9, str.tostring(max_exposure, "#.##") + "x", text_color=color.yellow, text_size=size.normal)
+
+//====================================================================================================================================================================//
+// OPTIMIZATION RANGES TABLE
+//====================================================================================================================================================================//
+
+// Create optimization table in bottom left corner
+var table opt_table = table.new(position.bottom_left, 3, 5, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+// Only update table on the last bar
+if barstate.islast
+    // Header
+    table.cell(opt_table, 0, 0, "Parameter", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(opt_table, 1, 0, "Range", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(opt_table, 2, 0, "Step", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+
+    // ATR Box Size (ATR Multiplier)
+    table.cell(opt_table, 0, 1, "ATR Box Size", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 1, "14 - 19", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 1, "0.1", text_color=color.lime, text_size=size.small)
+
+    // ATR Length
+    table.cell(opt_table, 0, 2, "ATR Length", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 2, "480 - 620", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 2, "1", text_color=color.lime, text_size=size.small)
+
+    // Short TRAMA Length
+    table.cell(opt_table, 0, 3, "Short TRAMA", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 3, "25 - 250", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 3, "1", text_color=color.lime, text_size=size.small)
+
+    // Long TRAMA Length
+    table.cell(opt_table, 0, 4, "Long TRAMA", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 4, "100 - 500", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 4, "1", text_color=color.lime, text_size=size.small)

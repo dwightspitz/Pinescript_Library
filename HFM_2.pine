@@ -1,0 +1,299 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Dwight_Spitz
+
+//@version=6
+strategy("Hedge Fund Manager 2 [SIGIL]", overlay=true, fill_orders_on_standard_ohlc = false, process_orders_on_close = true, default_qty_type = strategy.fixed, pyramiding = 100)
+
+// ===== STRATEGY SETUP =====
+r_sym = input.symbol("SPY", "Select Symbol for Momentum Calculation", group="Strategy Setup")
+start_date = input.time(timestamp("2024-03-01 04:00"), "Start Date", group="Strategy Setup")
+end_date = input.time(timestamp("2025-11-12 20:00"), "End Date", group="Strategy Setup")
+ticker = input.string("SPYU", "Target Symbol for Web Hook", group="Strategy Setup")
+position_scale = input.float(1.0, "Position Scale Factor", minval=0.01, step=0.1, tooltip="Multiply position sizes by this factor", group="Strategy Setup")
+hodl = input.float(2.03, "Hold%", tooltip="% position to hold on exits", group="Strategy Setup")
+hedgev = input.int(33, "Hedge %", group ="Strategy Setup")
+
+
+// ===== TRAMA SETTINGS =====
+enable_trama = input.bool(true, "Enable TRAMA", group="TRAMA Settings", tooltip = "Starting Equity = ATH")
+short_trama_length = input.int(20, "Short TRAMA Length", minval=1, group="TRAMA Settings", tooltip = "25-55 Step 1")
+long_trama_length = input.int(50, "Long TRAMA Length", minval=1, group="TRAMA Settings", tooltip = "130-160 Step 1")
+
+// ===== RSI FILTER SETTINGS =====
+enable_rsi_filter = input.bool(false, "Enable RSI Filter", group="RSI Filter")
+rsi_length = input.int(14, "RSI Length", minval=1, group="RSI Filter")
+rsi_smoothing_length = input.int(14, "RSI Smoothing Length (EMA)", minval=1, group="RSI Filter")
+rsi_timeframe = input.timeframe("", "RSI Timeframe", tooltip="Leave blank to use chart timeframe", group="RSI Filter")
+rsi_slope_threshold = input.float(0.0, "RSI Slope Threshold", step=0.01, tooltip="Minimum slope to allow entries", group="RSI Filter")
+
+// ===== TURTLE TRADING SETTINGS =====
+enable_turtle = input.bool(false, "Enable Turtle Trading", group="Turtle Trading")
+atr_multiplier = input.float(0.5, "ATR Box Size Multiplier", minval=0.1, step=0.1, tooltip="Multiple of ATR for pyramiding adds", group="Turtle Trading")
+atr_length = input.int(20, "ATR Length", minval=1, tooltip="Period for ATR calculation", group="Turtle Trading")
+
+//====================================================================================================================================================================//
+// TRAMA CALCULATION
+//====================================================================================================================================================================//
+
+// TRAMA calculation function
+trama_calc(src, length) =>
+    var float ama = na
+    hh = math.max(math.sign(ta.change(ta.highest(length))), 0)
+    ll = math.max(math.sign(ta.change(ta.lowest(length)) * -1), 0)
+    tc = math.pow(ta.sma((hh + ll) > 0 ? 1 : 0, length), 2)
+    ama := nz(ama[1] + tc * (src - ama[1]), src)
+    ama
+
+// Calculate TRAMA lines using close price
+short_trama = trama_calc(close, short_trama_length)
+long_trama = trama_calc(close, long_trama_length)
+
+// Calculate RSI Filter from timeframe
+rsi_close = rsi_timeframe == "" ? close : request.security(syminfo.tickerid, rsi_timeframe, close)
+rsi_raw = enable_rsi_filter ? ta.rsi(rsi_close, rsi_length) : na
+
+// Smooth RSI with EMA
+rsi_smoothed = enable_rsi_filter ? ta.ema(rsi_raw, rsi_smoothing_length) : na
+
+// Calculate RSI slope as angle in degrees
+// rise = change in RSI, run = 1 bar
+// angle = arctan(rise/run) converted to degrees
+rsi_change = enable_rsi_filter ? rsi_smoothed - rsi_smoothed[1] : na
+rsi_slope_radians = enable_rsi_filter ? math.atan(rsi_change / 1) : na
+rsi_slope = enable_rsi_filter ? math.todegrees(rsi_slope_radians) : na  // Convert to degrees
+
+// Theoretical range: -90° to +90°
+// 0° = flat (no change)
+// +45° = rising at 45 degree angle (strong uptrend)
+// -45° = falling at 45 degree angle (strong downtrend)
+
+// Check if RSI slope passes threshold
+rsi_filter_pass = enable_rsi_filter ? rsi_slope >= rsi_slope_threshold : true
+
+// Check if current bar is within date range
+in_date_range = time >= start_date and time <= end_date
+
+//====================================================================================================================================================================//
+// ATR CALCULATION (TURTLE METHOD)
+//====================================================================================================================================================================//
+
+// Request ATR data from the specified symbol (r_sym) at daily timeframe
+[r_high_daily, r_low_daily, r_close_daily] = request.security(r_sym, "1D", [high, low, close])
+
+// Calculate True Range using r_sym data
+r_tr_daily = math.max(r_high_daily - r_low_daily, math.abs(r_high_daily - r_close_daily[1]), math.abs(r_low_daily - r_close_daily[1]))
+
+// Calculate ATR using SMA (Turtle method)
+atr = ta.sma(r_tr_daily, atr_length)
+n_atr = (atr / r_close_daily)
+n_add = (n_atr / 2)
+
+// Calculate percent of equity
+poe = n_atr * 100 * position_scale
+poe_add = n_add * 100 * position_scale
+
+// Calculate exit percentages
+exit_percent = 100 - hodl
+
+
+
+// Track price for pyramiding
+var float last_entry_price = na
+
+//====================================================================================================================================================================//
+// SIMULATED RENKO CALCULATION USING ATR
+//====================================================================================================================================================================//
+
+// Request data from the momentum symbol
+[r_high, r_low, r_close, r_open] = request.security(r_sym, timeframe.period, [high, low, close, open])
+
+// Calculate ATR for box size
+r_tr = math.max(r_high - r_low, math.abs(r_high - r_close[1]), math.abs(r_low - r_close[1]))
+atr_value = ta.sma(r_tr, atr_length)
+box_size = atr_value * atr_multiplier
+
+// Initialize Renko state variables
+var float renko_close = na
+var float renko_open = na
+var int renko_direction = 0  // 1 for up, -1 for down, 0 for uninitialized
+
+// Initialize on first bar
+if na(renko_close)
+    renko_close := r_close
+    renko_open := r_close
+    renko_direction := 0
+
+// Calculate potential new Renko brick
+float temp_renko_close = renko_close
+float temp_renko_open = renko_open
+int temp_direction = renko_direction
+bool brick_formed = false
+
+// Check for up brick formation
+if r_close >= renko_close + box_size
+    // Calculate how many bricks can be formed
+    int num_bricks = math.floor((r_close - renko_close) / box_size)
+    temp_renko_open := renko_close
+    temp_renko_close := renko_close + (num_bricks * box_size)
+    temp_direction := 1
+    brick_formed := true
+
+// Check for down brick formation
+else if r_close <= renko_close - box_size
+    // Calculate how many bricks can be formed
+    int num_bricks = math.floor((renko_close - r_close) / box_size)
+    temp_renko_open := renko_close
+    temp_renko_close := renko_close - (num_bricks * box_size)
+    temp_direction := -1
+    brick_formed := true
+
+// Update Renko state if brick formed
+if brick_formed
+    renko_open := temp_renko_open
+    renko_close := temp_renko_close
+    renko_direction := temp_direction
+
+
+
+// Track position state
+var bool in_position = false
+
+//====================================================================================================================================================================//
+// RENKO BAR DIRECTION TRACKING
+//====================================================================================================================================================================//
+
+// Track previous direction
+var int prev_renko_direction = 0
+bool direction_changed = brick_formed and (renko_direction != prev_renko_direction) and prev_renko_direction != 0
+
+// Determine current brick direction
+bool renko_bullish = renko_close > renko_open
+bool renko_bearish = renko_close < renko_open
+
+// Update previous direction
+if brick_formed
+    prev_renko_direction := renko_direction
+
+//====================================================================================================================================================================//
+// TRAMA SIGNALS
+//====================================================================================================================================================================//
+//TRAMA UP
+trama_bull = ta.crossover(close, short_trama) or ta.crossover(close, long_trama)
+
+// Check if price is still above TRAMA lines (in valid bullish zone)
+price_above_trama = close > short_trama or close > long_trama
+
+// RSI slope crosses above threshold (momentum catches up)
+rsi_slope_crossover = enable_rsi_filter ? ta.crossover(rsi_slope, rsi_slope_threshold) : false
+
+// Entry conditions:
+// 1. Price crosses above TRAMA AND RSI slope filter passes (primary entry)
+// 2. Price is STILL above TRAMA AND RSI slope crosses above threshold (secondary entry)
+entry_signal = enable_trama and ((trama_bull and rsi_filter_pass) or (price_above_trama and rsi_slope_crossover)) and in_date_range
+
+// Exit: Price crosses below long TRAMA
+exit_signal = enable_trama and ta.crossunder(short_trama, long_trama) and in_date_range
+
+// Entry conditions - new up brick after down brick
+enter = brick_formed and renko_direction == 1 and prev_renko_direction == -1 and in_date_range
+
+// Add conditions - consecutive up brick
+add = brick_formed and renko_direction == 1 and prev_renko_direction == 1 and in_date_range
+
+// Hedge condition - new down brick after up brick
+hedge_condition = enable_turtle and in_position and ta.crossunder(close, long_trama) and in_date_range
+
+// Exit condition - consecutive down brick
+exit_condition = brick_formed and renko_direction == -1 and prev_renko_direction == -1 and in_date_range
+
+// Turtle add signal: Price has moved (atr_multiplier * ATR) from last entry (only if in position from TRAMA AND RSI filter passes)
+turtle_add_signal = enable_turtle and in_position and rsi_filter_pass and in_date_range and add
+
+//turtle hedge_condition
+turtle_hedge_condition = enable_turtle and in_position and in_date_range and hedge_condition
+
+//====================================================================================================================================================================//
+// STRATEGY EXECUTION
+//====================================================================================================================================================================//
+
+// Calculate position sizes using Turtle method (fixed qty)
+enter_fixed = (strategy.equity * (poe / 100)) / close
+add_fixed = (strategy.equity * (poe_add / 100)) / close
+
+// TRAMA Entry
+if entry_signal and not in_position
+    if enable_turtle
+        strategy.entry("Long", strategy.long, qty=enter_fixed, comment = "Long Enter: TRAMA Bullish")
+    else
+        strategy.entry("Long", strategy.long)
+    in_position := true
+    last_entry_price := close
+
+// Turtle Add (only if already in TRAMA position)
+if turtle_add_signal
+    strategy.entry("Long", strategy.long, qty=add_fixed, comment = "Long Enter: Add to position" )
+    last_entry_price := close
+
+// Hedge
+if hedge_condition and in_position
+    strategy.close("Long", qty_percent=hedgev, comment="Hedge!")
+
+// TRAMA Exit
+if exit_signal and in_position
+    if enable_turtle
+        strategy.close("Long", qty_percent=exit_percent, comment = "Long Exit: Close Position" )
+    else
+        strategy.close("Long")
+    in_position := false
+    last_entry_price := na
+
+//====================================================================================================================================================================//
+// VISUALIZATION
+//====================================================================================================================================================================//
+
+// Plot TRAMA lines
+plot(enable_trama ? short_trama : na, "Short TRAMA", color=color.new(color.green, 0), linewidth=2)
+plot(enable_trama ? long_trama : na, "Long TRAMA", color=color.new(color.red, 0), linewidth=2)
+
+// Plot entry/exit signals
+plotshape(entry_signal, "TRAMA Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(turtle_add_signal, "Turtle Add", shape.diamond, location.belowbar, color.lime, size=size.tiny)
+plotshape(exit_signal, "TRAMA Exit", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Plot RSI Slope in separate pane
+plot(enable_rsi_filter ? rsi_slope : na, "RSI Slope", color=color.new(color.orange, 0), linewidth=2)
+hline(rsi_slope_threshold, "RSI Slope Threshold", color=color.new(color.gray, 0), linestyle=hline.style_dashed)
+
+//====================================================================================================================================================================//
+// OPTIMIZATION RANGES TABLE
+//====================================================================================================================================================================//
+
+// Create optimization table in bottom left corner
+var table opt_table = table.new(position.bottom_left, 3, 5, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+// Only update table on the last bar
+if barstate.islast
+    // Header
+    table.cell(opt_table, 0, 0, "Parameter", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(opt_table, 1, 0, "Range", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+    table.cell(opt_table, 2, 0, "Step", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.small)
+
+    // ATR Box Size Multiplier
+    table.cell(opt_table, 0, 1, "ATR Box Size", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 1, "0.1 - 1.0", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 1, "0.1", text_color=color.lime, text_size=size.small)
+
+    // ATR Length
+    table.cell(opt_table, 0, 2, "ATR Length", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 2, "10 - 30", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 2, "1", text_color=color.lime, text_size=size.small)
+
+    // Short TRAMA Length
+    table.cell(opt_table, 0, 3, "Short TRAMA", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 3, "25 - 55", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 3, "1", text_color=color.lime, text_size=size.small)
+
+    // Long TRAMA Length
+    table.cell(opt_table, 0, 4, "Long TRAMA", text_color=color.white, text_size=size.small)
+    table.cell(opt_table, 1, 4, "130 - 160", text_color=color.aqua, text_size=size.small)
+    table.cell(opt_table, 2, 4, "1", text_color=color.lime, text_size=size.small)

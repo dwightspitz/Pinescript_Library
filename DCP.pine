@@ -1,0 +1,65 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © Dwight_Spitz
+
+//@version=6
+indicator("DCP - Daily Contract Position", overlay=true)
+
+// ===== INPUT PARAMETERS =====
+portfolio_value = input.float(100000, "Portfolio Value", minval=0, step=1000, group="Portfolio Settings")
+target_premium = input.float(1.20, "Target Premium", minval=0, step=0.01, group="Portfolio Settings")
+total_contracts_allowed = input.int(3, "Total Contracts Allowed", minval=1, group="Portfolio Settings")
+
+// Active Trades
+active_contracts = input.int(0, "Active Contracts", minval=0, group="Active Trades")
+average_cost = input.float(0, "Average Cost", minval=0, step=0.01, group="Active Trades")
+
+// ===== CALCULATIONS =====
+
+// Risk per Trade calculation
+// Formula: (portfolio_value * 0.01) / 0.2
+risk_per_trade = (portfolio_value * 0.01) / 0.2
+
+// Stop Loss Price calculation
+// Formula: average_cost - (risk_per_trade / (active_contracts * 100))
+// Each contract represents 100 shares/units
+stop_loss_price = active_contracts > 0 ? average_cost - (risk_per_trade / (active_contracts * 100)) : na
+
+// ===== DISPLAY TABLE =====
+
+// Create table in top right corner
+var table info_table = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 10), border_width=1, border_color=color.gray)
+
+// Only update table on the last bar
+if barstate.islast
+    // Header
+    table.cell(info_table, 0, 0, "Metric", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.normal)
+    table.cell(info_table, 1, 0, "Value", text_color=color.white, bgcolor=color.new(color.gray, 30), text_size=size.normal)
+
+    // Portfolio Value
+    table.cell(info_table, 0, 1, "Portfolio Value", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 1, "$" + str.tostring(portfolio_value, "#,###"), text_color=color.aqua, text_size=size.normal)
+
+    // Risk per Trade
+    table.cell(info_table, 0, 2, "Risk per Trade", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 2, "$" + str.tostring(risk_per_trade, "#,###.##"), text_color=color.yellow, text_size=size.normal)
+
+    // Target Premium
+    table.cell(info_table, 0, 3, "Target Premium", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 3, "$" + str.tostring(target_premium, "#.##"), text_color=color.lime, text_size=size.normal)
+
+    // Total Contracts Allowed
+    table.cell(info_table, 0, 4, "Contracts Allowed", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 4, str.tostring(total_contracts_allowed, "#"), text_color=color.orange, text_size=size.normal)
+
+    // Active Contracts
+    table.cell(info_table, 0, 5, "Active Contracts", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 5, str.tostring(active_contracts, "#"), text_color=color.purple, text_size=size.normal)
+
+    // Average Cost
+    table.cell(info_table, 0, 6, "Average Cost", text_color=color.white, text_size=size.normal)
+    table.cell(info_table, 1, 6, "$" + str.tostring(average_cost, "#.##"), text_color=color.white, text_size=size.normal)
+
+    // Stop Loss Price
+    table.cell(info_table, 0, 7, "Stop Loss Price", text_color=color.white, text_size=size.normal)
+    stop_loss_display = na(stop_loss_price) ? "N/A" : "$" + str.tostring(stop_loss_price, "#.##")
+    table.cell(info_table, 1, 7, stop_loss_display, text_color=color.red, text_size=size.normal)
